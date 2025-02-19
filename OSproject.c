@@ -49,14 +49,19 @@ void get_memory_info() {
     // Read from file
     while (fscanf(fp, "%s %lld", label, &value) != EOF) { // Read from file
         if (strcmp(label, "MemTotal:") == 0) { // If label is MemTotal
+            total = value;
             printf("Total Memory: %lld KB\n", value); // Print total memory
         } else if (strcmp(label, "MemFree:") == 0) { // If label is MemFree
+            free = value;
             printf("Free Memory: %lld KB\n", value); // Print free memory
         } else if (strcmp(label, "MemAvailable:") == 0) { // If label is MemAvailable
+            available = value;
             printf("Available Memory: %lld KB\n", value); // Print available memory
         } else if (strcmp(label, "Buffers:") == 0) { // If label is Buffers
+            buffers = value;
             printf("Buffers: %lld KB\n", value); // Print buffers
         } else if (strcmp(label, "Cached:") == 0) { // If label is Cached
+            cached = value;
             printf("Cached: %lld KB\n", value); // Print cached
         }
     }
@@ -70,14 +75,12 @@ void get_disk_info() {
         perror("Couldn't open /proc/diskstats");
         exit(EXIT_FAILURE);
     }
-    if (fscanf(fp, "%lld %lld %s %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld", &read, &write, label, &flushes, &read_time, &write_time, &io_time) != EOF) { // Read from file
+    while (fscanf(fp, "%*d %*d %s %*d %*d %lld %*d %*d %lld %*d %*d %*d %lld", label, &read, &write, &io_time) != EOF) { // Read from file
         if (strcmp(label, Disk) == 0) { // If label is Disk
             printf("Read: %lld\n", read); // Print read
             printf("Write: %lld\n", write); // Print write
-            printf("Flushes: %lld\n", flushes); // Print flushes
-            printf("Read Time: %lld\n", read_time); // Print read time
-            printf("Write Time: %lld\n", write_time); // Print write time
             printf("IO Time: %lld\n", io_time); // Print IO time
+            break;
         }
     }
     fclose(fp);
@@ -127,6 +130,9 @@ void monitor_system() {
 
 // Main function
 int main() {
+    long long idle, total;
+    long long idle1, total1;
+    long long idle_diff, total_diff;
     // Menu
     while (choice != 3) {
         printf("1. Monitor System\n");

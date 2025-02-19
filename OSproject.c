@@ -127,10 +127,6 @@ void monitor_system() {
 
 // Main function
 int main() {
-    long long idle, total;
-    long long idle1, total1;
-    long long idle_diff, total_diff;
-    double cpu_usage;
     // Menu
     while (choice != 3) {
         printf("1. Monitor System\n");
@@ -163,4 +159,3 @@ int main() {
     printf("[CyberGuardians] SCIA 360: Module loaded successfully. Team Members: Alice Smith, Bob Johnson, Charlie Lee\n");
     return 0;
 }
-

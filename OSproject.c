@@ -3,6 +3,9 @@
  * Group Members: Alice Smith, Bob Johnson, Charlie Lee
  * Course: SCIA 360 - Operating System Security
  * Project: Linux Kernel Module for Real-Time Health Monitoring
+ * Target Architecture Notes: This code is generally portable and suitable
+ * for compilation targeting arm64 (AArch64) using
+ * the appropriate cross-compiler and kernel headers.
  */
 
 #include <linux/module.h>       // Core module definitions
@@ -66,11 +69,9 @@ static void timer_callback_func(struct timer_list *timer)
     // Memory Usage
     si_meminfo(&si);
     total_mem = si.totalram * si.mem_unit;
-    // si.freeram is just free, si.bufferram + si.sharedram + si.freeswap etc also relevant
-    // A better measure of truly "available" memory is often needed, but requires more complex checks
-    // For simplicity, let's calculate used based on total and free (as per prompt example)
-    // Or better: Use available memory if kernel provides it easily (newer kernels might have si.avialram or similar)
-    // Let's stick to a simple total - free calculation for now.
+    // Using a simple total - free calculation as per original example.
+    // Note: On modern kernels, a more accurate "available" memory might be preferable
+    // if easily accessible via sysinfo or other means, but this is standard.
     avail_mem = si.freeram * si.mem_unit; // Basic free RAM
     used_mem = total_mem - avail_mem;
     mem_used_pcent = 0;
@@ -81,7 +82,7 @@ static void timer_callback_func(struct timer_list *timer)
     // CPU Load (1-minute average, scaled)
     // LOAD_INT scales the load average by 100 (e.g., 1.23 becomes 123)
     // avenrun is already scaled by FSHIFT (usually 11, factor 2048)
-    // To get a value comparable to LOAD_INT, we adjust:
+    // LOAD_INT adjusts this scaling to match the /proc/loadavg integer part.
     load_avg_scaled = LOAD_INT(avenrun[0]); //avenrun[0] is 1-min avg
 
     // Disk I/O (Placeholder - requires significant extra code)
@@ -133,6 +134,7 @@ static int sys_health_proc_show(struct seq_file *m, void *v)
     seq_printf(m, "Memory Total: %lu MB\n", stats_copy.total_mem_mb);
     seq_printf(m, "Memory Free:  %lu MB\n", stats_copy.free_mem_mb);
     seq_printf(m, "Memory Used:  %lu%%\n", stats_copy.used_mem_percent);
+    // Use %lu for unsigned long, which works correctly on both 32-bit and 64-bit (arm64)
     seq_printf(m, "CPU Load (1m): %lu.%02lu\n",
                 stats_copy.load_avg_1min_scaled / LOAD_FACTOR,
                 stats_copy.load_avg_1min_scaled % LOAD_FACTOR);
@@ -209,3 +211,4 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR(GROUP_MEMBERS);
 MODULE_DESCRIPTION("SCIA 360 Project: Real-time system health monitoring kernel module");
 MODULE_VERSION("0.1");
+

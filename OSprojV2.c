@@ -9,8 +9,8 @@
 #include <linux/slab.h>         // Needed for kmalloc/kfree (though not strictly needed for this basic version)
 
 // --- Group Identification ---
-#define GROUP_NAME "CyberGuardians" // <<<--- REPLACE WITH YOUR GROUP NAME
-#define MEMBER_NAMES "Alice, Bob, Charlie" // <<<--- REPLACE WITH YOUR MEMBER NAMES
+#define GROUP_NAME "YARA"
+#define MEMBER_NAMES "Ethan" 
 // --------------------------
 
 MODULE_LICENSE("GPL");

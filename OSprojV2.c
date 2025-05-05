@@ -5,19 +5,19 @@
 #include <linux/seq_file.h>     // Needed for seq_file operations
 #include <linux/timer.h>        // Needed for kernel timers
 #include <linux/mm.h>           // Needed for si_meminfo()
-#include <linux/sched.h>        // Needed for load average (avenrun)
-#include <linux/vmstat.h>       // Needed for global page state (pgpgin/pgpgout)
+#include <linux/sched.h>        // Needed for load average (avenrun) and FSHIFT
+#include <linux/vmstat.h>       // Needed for VM event counters (PGPGIN/PGPGOUT)
 #include <linux/slab.h>         // Needed for kmalloc/kfree (though not strictly needed for this basic version)
 
 // --- Group Identification ---
-#define GROUP_NAME "YARA" 
-#define MEMBER_NAMES "EThan, Hector, Michael" 
+#define GROUP_NAME "CyberGuardians" // <<<--- REPLACE WITH YOUR GROUP NAME
+#define MEMBER_NAMES "Alice, Bob, Charlie" // <<<--- REPLACE WITH YOUR MEMBER NAMES
 // --------------------------
 
-MODULE_LICENSE("YARY");
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR(MEMBER_NAMES);
 MODULE_DESCRIPTION("A simple system health monitor kernel module (CPU, Mem, Disk I/O)");
-MODULE_VERSION("0.2");
+MODULE_VERSION("0.3"); // Version bump
 
 // --- Module Parameters ---
 static int mem_threshold = 80; // Default: alert if free memory < 80%
@@ -90,14 +90,13 @@ static void collect_and_check_metrics(struct timer_list *t)
     }
 
     // CPU Load (1-minute average)
-    // avenrun is scaled by FSHIFT (usually 11), so LOAD_SCALE is (1 << 11) = 2048
     current_load_scaled = avenrun[0]; // Read the scaled 1-min load average
     last_cpu_load_scaled = current_load_scaled;
 
     // Disk I/O (Page Ins/Outs Rate)
-    // Get current global counts for pages paged in/out
-    current_pgpgin = global_node_page_state(NR_PAGINGIN); // Requires <linux/vmstat.h>
-    current_pgpgout = global_node_page_state(NR_PAGINGOUT); // Requires <linux/vmstat.h>
+    // Get current global counts for pages paged in/out using VM event counters
+    current_pgpgin = count_vm_event(PGPGIN);   // Requires <linux/vmstat.h>
+    current_pgpgout = count_vm_event(PGPGOUT); // Requires <linux/vmstat.h>
 
     if (first_run) {
         // On the first run, we can't calculate a delta
@@ -124,15 +123,13 @@ static void collect_and_check_metrics(struct timer_list *t)
 
     // CPU Load Alert
     // Compare scaled load average * 100 with threshold
-    // LOAD_SCALE is (1 << FSHIFT), usually 2048. Threshold is scaled by 100.
-    // So, compare avenrun[0] * 100 with cpu_load_threshold * LOAD_SCALE
-    if ((current_load_scaled * 100) > (cpu_load_threshold * LOAD_SCALE)) {
-        // Format load average for printing: load = current_load_scaled / LOAD_SCALE
-        // Print as X.YY: (scaled / SCALE), (scaled % SCALE * 100 / SCALE)
+    // Use (1UL << FSHIFT) instead of LOAD_SCALE. FSHIFT is from <linux/sched.h>
+    if ((current_load_scaled * 100) > (cpu_load_threshold * (1UL << FSHIFT))) {
+        // Format load average for printing: load = current_load_scaled / (1UL << FSHIFT)
         printk(KERN_WARNING "[%s] Alert: CPU Load Avg (1m) (%lu.%02lu) exceeds threshold (> %d.%02d)!\n",
                GROUP_NAME,
-               current_load_scaled / LOAD_SCALE,
-               (current_load_scaled % LOAD_SCALE) * 100 / LOAD_SCALE,
+               current_load_scaled / (1UL << FSHIFT),
+               (current_load_scaled % (1UL << FSHIFT)) * 100 / (1UL << FSHIFT),
                cpu_load_threshold / 100, cpu_load_threshold % 100);
     }
 
@@ -153,8 +150,9 @@ static int health_proc_show(struct seq_file *m, void *v)
     unsigned long load_avg_int, load_avg_frac;
 
     // Calculate integer and fractional parts of the load average for printing
-    load_avg_int = last_cpu_load_scaled / LOAD_SCALE;
-    load_avg_frac = (last_cpu_load_scaled % LOAD_SCALE) * 100 / LOAD_SCALE;
+    // Use (1UL << FSHIFT) instead of LOAD_SCALE
+    load_avg_int = last_cpu_load_scaled / (1UL << FSHIFT);
+    load_avg_frac = (last_cpu_load_scaled % (1UL << FSHIFT)) * 100 / (1UL << FSHIFT);
 
     seq_printf(m, "--- System Health Monitor (%s) ---\n", GROUP_NAME);
     seq_printf(m, "Group Members: %s\n", MEMBER_NAMES);
@@ -182,7 +180,7 @@ static int health_proc_open(struct inode *inode, struct file *file)
 // --- Module Initialization Function ---
 static int __init sys_health_init(void)
 {
-    printk(KERN_INFO "[%s] Loading System Health Monitor Module v0.2 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
+    printk(KERN_INFO "[%s] Loading System Health Monitor Module v0.3 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
 
     // Create /proc entry
     proc_file_entry = proc_create(proc_filename, 0444, NULL, &health_proc_ops);
@@ -210,7 +208,7 @@ static int __init sys_health_init(void)
 // --- Module Cleanup Function ---
 static void __exit sys_health_exit(void)
 {
-    printk(KERN_INFO "[%s] Unloading System Health Monitor Module v0.2 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
+    printk(KERN_INFO "[%s] Unloading System Health Monitor Module v0.3 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
 
     // Delete the timer
     del_timer_sync(&health_timer); // Wait for timer callback to finish if running

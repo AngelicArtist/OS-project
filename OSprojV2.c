@@ -6,7 +6,7 @@
 #include <linux/timer.h>        // Needed for kernel timers
 #include <linux/mm.h>           // Needed for si_meminfo()
 #include <linux/sched.h>        // Needed for load average (avenrun) and FSHIFT
-#include <linux/vmstat.h>       // Needed for VM event counters (PGPGIN/PGPGOUT)
+// #include <linux/vmstat.h>    // No longer needed
 #include <linux/slab.h>         // Needed for kmalloc/kfree (though not strictly needed for this basic version)
 
 // --- Group Identification ---
@@ -16,8 +16,8 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR(MEMBER_NAMES);
-MODULE_DESCRIPTION("A simple system health monitor kernel module (CPU, Mem, Disk I/O)");
-MODULE_VERSION("0.3"); // Version bump
+MODULE_DESCRIPTION("A simple system health monitor kernel module (CPU, Mem)"); // Updated description
+MODULE_VERSION("0.4"); // Version bump
 
 // --- Module Parameters ---
 static int mem_threshold = 80; // Default: alert if free memory < 80%
@@ -29,11 +29,6 @@ static int cpu_load_threshold = 150; // Default: alert if 1-min load avg > 1.50
 module_param(cpu_load_threshold, int, 0644);
 MODULE_PARM_DESC(cpu_load_threshold, "CPU load threshold * 100 (1-min average > X / 100 triggers alert). Default: 150 (for 1.50)");
 
-// disk_io_threshold represents pages paged in+out per interval
-static int disk_io_threshold = 1000; // Default: alert if > 1000 pages paged in+out in 5 seconds
-module_param(disk_io_threshold, int, 0644);
-MODULE_PARM_DESC(disk_io_threshold, "Disk I/O threshold (pages paged in+out per interval > X triggers alert). Default: 1000");
-
 // --- Global Variables ---
 static struct timer_list health_timer; // Kernel timer
 static struct proc_dir_entry *proc_file_entry; // /proc entry pointer
@@ -44,17 +39,8 @@ static unsigned long timer_interval_ms = 5000; // Timer interval in milliseconds
 static unsigned long last_total_mem = 0;
 static unsigned long last_free_mem = 0;
 static unsigned long last_cpu_load_scaled = 0; // Scaled 1-min load average
-static unsigned long last_pgpgin_delta = 0;    // Pages paged in since last check
-static unsigned long last_pgpgout_delta = 0;   // Pages paged out since last check
-
-// Variables to store previous values for calculating deltas
-static unsigned long prev_pgpgin = 0;
-static unsigned long prev_pgpgout = 0;
-static bool first_run = true; // Flag to handle first run for disk I/O delta
 
 // --- Accessing Load Average ---
-// avenrun holds scaled 1, 5, 15 min load averages
-// We need to declare it as extern as it's defined elsewhere in the kernel
 extern unsigned long avenrun[]; // Needs <linux/sched.h>
 
 // --- Function Prototypes ---
@@ -74,10 +60,8 @@ static const struct proc_ops health_proc_ops = {
 static void collect_and_check_metrics(struct timer_list *t)
 {
     struct sysinfo info;
-    unsigned long current_pgpgin, current_pgpgout;
     unsigned long current_load_scaled;
     unsigned long free_percentage = 100; // Default to 100% if total_mem is 0
-    unsigned long total_io_delta = 0;
 
     // --- 1. Collect Metrics ---
 
@@ -93,26 +77,6 @@ static void collect_and_check_metrics(struct timer_list *t)
     current_load_scaled = avenrun[0]; // Read the scaled 1-min load average
     last_cpu_load_scaled = current_load_scaled;
 
-    // Disk I/O (Page Ins/Outs Rate)
-    // Get current global counts for pages paged in/out using VM event counters
-    current_pgpgin = count_vm_event(PGPGIN);   // Requires <linux/vmstat.h>
-    current_pgpgout = count_vm_event(PGPGOUT); // Requires <linux/vmstat.h>
-
-    if (first_run) {
-        // On the first run, we can't calculate a delta
-        last_pgpgin_delta = 0;
-        last_pgpgout_delta = 0;
-        first_run = false;
-    } else {
-        // Calculate delta since last check
-        last_pgpgin_delta = current_pgpgin - prev_pgpgin;
-        last_pgpgout_delta = current_pgpgout - prev_pgpgout;
-    }
-    // Store current values for next calculation
-    prev_pgpgin = current_pgpgin;
-    prev_pgpgout = current_pgpgout;
-    total_io_delta = last_pgpgin_delta + last_pgpgout_delta;
-
     // --- 2. Check Thresholds ---
 
     // Memory Alert
@@ -122,23 +86,14 @@ static void collect_and_check_metrics(struct timer_list *t)
     }
 
     // CPU Load Alert
-    // Compare scaled load average * 100 with threshold
     // Use (1UL << FSHIFT) instead of LOAD_SCALE. FSHIFT is from <linux/sched.h>
     if ((current_load_scaled * 100) > (cpu_load_threshold * (1UL << FSHIFT))) {
-        // Format load average for printing: load = current_load_scaled / (1UL << FSHIFT)
         printk(KERN_WARNING "[%s] Alert: CPU Load Avg (1m) (%lu.%02lu) exceeds threshold (> %d.%02d)!\n",
                GROUP_NAME,
                current_load_scaled / (1UL << FSHIFT),
                (current_load_scaled % (1UL << FSHIFT)) * 100 / (1UL << FSHIFT),
                cpu_load_threshold / 100, cpu_load_threshold % 100);
     }
-
-    // Disk I/O Alert
-    if (total_io_delta > disk_io_threshold) {
-        printk(KERN_WARNING "[%s] Alert: Disk I/O pages (%lu pg/in + %lu pg/out = %lu pgs/%lums) exceeds threshold (> %d)!\n",
-               GROUP_NAME, last_pgpgin_delta, last_pgpgout_delta, total_io_delta, timer_interval_ms, disk_io_threshold);
-    }
-
 
     // --- 3. Rearm Timer ---
     mod_timer(&health_timer, jiffies + msecs_to_jiffies(timer_interval_ms));
@@ -150,7 +105,6 @@ static int health_proc_show(struct seq_file *m, void *v)
     unsigned long load_avg_int, load_avg_frac;
 
     // Calculate integer and fractional parts of the load average for printing
-    // Use (1UL << FSHIFT) instead of LOAD_SCALE
     load_avg_int = last_cpu_load_scaled / (1UL << FSHIFT);
     load_avg_frac = (last_cpu_load_scaled % (1UL << FSHIFT)) * 100 / (1UL << FSHIFT);
 
@@ -160,13 +114,12 @@ static int health_proc_show(struct seq_file *m, void *v)
     seq_printf(m, "Memory Total: %lu MB\n", last_total_mem);
     seq_printf(m, "Memory Free:  %lu MB\n", last_free_mem);
     seq_printf(m, "CPU Load Avg (1m): %lu.%02lu\n", load_avg_int, load_avg_frac);
-    seq_printf(m, "Disk I/O Rate (last %lums): %lu pg/in, %lu pg/out\n",
-               timer_interval_ms, last_pgpgin_delta, last_pgpgout_delta);
+    // Removed Disk I/O line
     seq_printf(m, "--------------------------------------\n");
     seq_printf(m, "Alert Thresholds:\n");
     seq_printf(m, "  Memory Free < %d %%\n", mem_threshold);
     seq_printf(m, "  CPU Load > %d.%02d\n", cpu_load_threshold / 100, cpu_load_threshold % 100);
-    seq_printf(m, "  Disk I/O > %d pages/%lums\n", disk_io_threshold, timer_interval_ms);
+    // Removed Disk I/O threshold line
     seq_printf(m, "--------------------------------------\n");
     return 0;
 }
@@ -180,7 +133,7 @@ static int health_proc_open(struct inode *inode, struct file *file)
 // --- Module Initialization Function ---
 static int __init sys_health_init(void)
 {
-    printk(KERN_INFO "[%s] Loading System Health Monitor Module v0.3 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
+    printk(KERN_INFO "[%s] Loading System Health Monitor Module v0.4 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
 
     // Create /proc entry
     proc_file_entry = proc_create(proc_filename, 0444, NULL, &health_proc_ops);
@@ -193,9 +146,7 @@ static int __init sys_health_init(void)
     // Setup the timer
     timer_setup(&health_timer, collect_and_check_metrics, 0);
 
-    // Set initial values and arm timer
-    first_run = true; // Ensure first run flag is set
-    // Run collection once immediately to populate initial values (especially for disk I/O prev values)
+    // Run collection once immediately to populate initial values
     collect_and_check_metrics(NULL);
     // Now arm the timer for the next regular interval
     mod_timer(&health_timer, jiffies + msecs_to_jiffies(timer_interval_ms));
@@ -208,7 +159,7 @@ static int __init sys_health_init(void)
 // --- Module Cleanup Function ---
 static void __exit sys_health_exit(void)
 {
-    printk(KERN_INFO "[%s] Unloading System Health Monitor Module v0.3 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
+    printk(KERN_INFO "[%s] Unloading System Health Monitor Module v0.4 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
 
     // Delete the timer
     del_timer_sync(&health_timer); // Wait for timer callback to finish if running

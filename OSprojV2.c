@@ -1,177 +1,251 @@
-#include <linux/module.h>       // Needed by all modules
-#include <linux/kernel.h>       // Needed for KERN_INFO, printk()
-#include <linux/init.h>         // Needed for the macros __init and __exit
-#include <linux/proc_fs.h>      // Needed for proc filesystem
-#include <linux/seq_file.h>     // Needed for seq_file operations
-#include <linux/timer.h>        // Needed for kernel timers
-#include <linux/mm.h>           // Needed for si_meminfo()
-#include <linux/sched.h>        // Needed for load average (avenrun) and FSHIFT
-// #include <linux/vmstat.h>    // No longer needed
-#include <linux/slab.h>         // Needed for kmalloc/kfree (though not strictly needed for this basic version)
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h> // For sleep()
+#include <sys/statvfs.h> // For disk usage
+#include <time.h>   // For timestamps
 
-// --- Group Identification ---
-#define GROUP_NAME "CyberGuardians" // <<<--- REPLACE WITH YOUR GROUP NAME
-#define MEMBER_NAMES "Alice, Bob, Charlie" // <<<--- REPLACE WITH YOUR MEMBER NAMES
-// --------------------------
+// ANSI Color Codes
+#define RESET   "\033[0m"
+#define RED     "\033[0;31m"
+#define GREEN   "\033[0;32m"
+#define YELLOW  "\033[0;33m"
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR(MEMBER_NAMES);
-MODULE_DESCRIPTION("A simple system health monitor kernel module (CPU, Mem)"); // Updated description
-MODULE_VERSION("0.4"); // Version bump
-
-// --- Module Parameters ---
-static int mem_threshold = 80; // Default: alert if free memory < 80%
-module_param(mem_threshold, int, 0644);
-MODULE_PARM_DESC(mem_threshold, "Memory usage threshold percentage (free memory < X % triggers alert). Default: 80");
-
-// cpu_load_threshold * 100 represents the scaled load average threshold (e.g., 150 means alert if load > 1.50)
-static int cpu_load_threshold = 150; // Default: alert if 1-min load avg > 1.50
-module_param(cpu_load_threshold, int, 0644);
-MODULE_PARM_DESC(cpu_load_threshold, "CPU load threshold * 100 (1-min average > X / 100 triggers alert). Default: 150 (for 1.50)");
-
-// --- Global Variables ---
-static struct timer_list health_timer; // Kernel timer
-static struct proc_dir_entry *proc_file_entry; // /proc entry pointer
-static const char *proc_filename = "sys_health"; // /proc filename
-static unsigned long timer_interval_ms = 5000; // Timer interval in milliseconds
-
-// Variables to store the latest metrics for /proc
-static unsigned long last_total_mem = 0;
-static unsigned long last_free_mem = 0;
-static unsigned long last_cpu_load_scaled = 0; // Scaled 1-min load average
-
-// --- Accessing Load Average ---
-extern unsigned long avenrun[]; // Needs <linux/sched.h>
+// Global variables for CPU calculation
+static unsigned long long prev_total_cpu_time = 0;
+static unsigned long long prev_idle_cpu_time = 0;
 
 // --- Function Prototypes ---
-static void collect_and_check_metrics(struct timer_list *t);
-static int health_proc_show(struct seq_file *m, void *v);
-static int health_proc_open(struct inode *inode, struct file *file);
+float get_cpu_usage();
+float get_ram_usage();
+float get_disk_usage(const char *path);
+void print_with_timestamp(const char *message, const char *color);
 
-// --- /proc File Operations ---
-static const struct proc_ops health_proc_ops = {
-    .proc_open    = health_proc_open,
-    .proc_read    = seq_read,
-    .proc_lseek   = seq_lseek,
-    .proc_release = single_release,
-};
+// --- CPU Usage Function ---
+float get_cpu_usage() {
+    FILE *fp;
+    char line[256];
+    unsigned long long user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
+    unsigned long long current_total_cpu_time, current_idle_cpu_time;
+    unsigned long long total_diff, idle_diff;
+    float cpu_percentage = 0.0f;
 
-// --- Timer Callback Function ---
-static void collect_and_check_metrics(struct timer_list *t)
-{
-    struct sysinfo info;
-    unsigned long current_load_scaled;
-    unsigned long free_percentage = 100; // Default to 100% if total_mem is 0
-
-    // --- 1. Collect Metrics ---
-
-    // Memory Usage
-    si_meminfo(&info);
-    last_total_mem = info.totalram * info.mem_unit / (1024 * 1024); // Convert to MB
-    last_free_mem = info.freeram * info.mem_unit / (1024 * 1024); // Convert to MB
-    if (last_total_mem > 0) {
-        free_percentage = (last_free_mem * 100) / last_total_mem;
+    fp = fopen("/proc/stat", "r");
+    if (fp == NULL) {
+        perror(RED "Error opening /proc/stat" RESET);
+        return -1.0f; // Error
     }
 
-    // CPU Load (1-minute average)
-    current_load_scaled = avenrun[0]; // Read the scaled 1-min load average
-    last_cpu_load_scaled = current_load_scaled;
+    if (fgets(line, sizeof(line), fp) == NULL) {
+        perror(RED "Error reading /proc/stat" RESET);
+        fclose(fp);
+        return -1.0f;
+    }
+    fclose(fp);
 
-    // --- 2. Check Thresholds ---
+    // Format: cpu  user nice system idle iowait irq softirq steal guest guest_nice
+    sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+           &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal, &guest, &guest_nice);
 
-    // Memory Alert
-    if (free_percentage < mem_threshold) {
-        printk(KERN_WARNING "[%s] Alert: Free Memory (%lu%%) is below threshold (%d%%)!\n",
-               GROUP_NAME, free_percentage, mem_threshold);
+    current_idle_cpu_time = idle + iowait;
+    current_total_cpu_time = user + nice + system + idle + iowait + irq + softirq + steal;
+
+    if (prev_total_cpu_time == 0) { // First run, just store values
+        prev_total_cpu_time = current_total_cpu_time;
+        prev_idle_cpu_time = current_idle_cpu_time;
+        // Cannot calculate percentage on first run accurately without a previous point
+        return 0.0f; // Or a specific code indicating first run
     }
 
-    // CPU Load Alert
-    // Use (1UL << FSHIFT) instead of LOAD_SCALE. FSHIFT is from <linux/sched.h>
-    if ((current_load_scaled * 100) > (cpu_load_threshold * (1UL << FSHIFT))) {
-        printk(KERN_WARNING "[%s] Alert: CPU Load Avg (1m) (%lu.%02lu) exceeds threshold (> %d.%02d)!\n",
-               GROUP_NAME,
-               current_load_scaled / (1UL << FSHIFT),
-               (current_load_scaled % (1UL << FSHIFT)) * 100 / (1UL << FSHIFT),
-               cpu_load_threshold / 100, cpu_load_threshold % 100);
-    }
+    total_diff = current_total_cpu_time - prev_total_cpu_time;
+    idle_diff = current_idle_cpu_time - prev_idle_cpu_time;
 
-    // --- 3. Rearm Timer ---
-    mod_timer(&health_timer, jiffies + msecs_to_jiffies(timer_interval_ms));
+    if (total_diff > 0) { // Avoid division by zero
+        cpu_percentage = (float)(total_diff - idle_diff) * 100.0f / (float)total_diff;
+    } else {
+        cpu_percentage = 0.0f; // Or handle as error/unchanged if total_diff is 0
+    }
+    
+
+    prev_total_cpu_time = current_total_cpu_time;
+    prev_idle_cpu_time = current_idle_cpu_time;
+
+    return cpu_percentage;
 }
 
-// --- /proc Show Function (Called when /proc file is read) ---
-static int health_proc_show(struct seq_file *m, void *v)
-{
-    unsigned long load_avg_int, load_avg_frac;
+// --- RAM Usage Function ---
+float get_ram_usage() {
+    FILE *fp;
+    char line[256];
+    unsigned long mem_total = 0, mem_available = 0, mem_free = 0, buffers = 0, cached = 0;
+    float ram_percentage = 0.0f;
+    int found_mem_available = 0;
 
-    // Calculate integer and fractional parts of the load average for printing
-    load_avg_int = last_cpu_load_scaled / (1UL << FSHIFT);
-    load_avg_frac = (last_cpu_load_scaled % (1UL << FSHIFT)) * 100 / (1UL << FSHIFT);
+    fp = fopen("/proc/meminfo", "r");
+    if (fp == NULL) {
+        perror(RED "Error opening /proc/meminfo" RESET);
+        return -1.0f;
+    }
 
-    seq_printf(m, "--- System Health Monitor (%s) ---\n", GROUP_NAME);
-    seq_printf(m, "Group Members: %s\n", MEMBER_NAMES);
-    seq_printf(m, "--------------------------------------\n");
-    seq_printf(m, "Memory Total: %lu MB\n", last_total_mem);
-    seq_printf(m, "Memory Free:  %lu MB\n", last_free_mem);
-    seq_printf(m, "CPU Load Avg (1m): %lu.%02lu\n", load_avg_int, load_avg_frac);
-    // Removed Disk I/O line
-    seq_printf(m, "--------------------------------------\n");
-    seq_printf(m, "Alert Thresholds:\n");
-    seq_printf(m, "  Memory Free < %d %%\n", mem_threshold);
-    seq_printf(m, "  CPU Load > %d.%02d\n", cpu_load_threshold / 100, cpu_load_threshold % 100);
-    // Removed Disk I/O threshold line
-    seq_printf(m, "--------------------------------------\n");
+    while (fgets(line, sizeof(line), fp)) {
+        if (sscanf(line, "MemTotal: %lu kB", &mem_total) == 1) {}
+        else if (sscanf(line, "MemFree: %lu kB", &mem_free) == 1) {}
+        else if (sscanf(line, "MemAvailable: %lu kB", &mem_available) == 1) {
+            found_mem_available = 1;
+        }
+        else if (sscanf(line, "Buffers: %lu kB", &buffers) == 1) {}
+        else if (sscanf(line, "Cached: %lu kB", &cached) == 1) {} // Simple cached, could also include SReclaimable
+    }
+    fclose(fp);
+
+    if (mem_total == 0) {
+        fprintf(stderr, RED "Could not parse MemTotal from /proc/meminfo\n" RESET);
+        return -1.0f;
+    }
+
+    unsigned long used_mem;
+    if (found_mem_available && mem_available > 0) { // Preferred method
+        used_mem = mem_total - mem_available;
+    } else { // Fallback for older kernels or if MemAvailable is not found/parsed
+        used_mem = mem_total - mem_free - buffers - cached;
+    }
+
+    ram_percentage = (float)used_mem * 100.0f / (float)mem_total;
+    return ram_percentage;
+}
+
+// --- Disk Usage Function ---
+float get_disk_usage(const char *path) {
+    struct statvfs stat;
+    float disk_percentage = 0.0f;
+
+    if (statvfs(path, &stat) != 0) {
+        perror(RED "Error getting disk usage" RESET);
+        return -1.0f;
+    }
+
+    unsigned long long total_blocks = stat.f_blocks;
+    unsigned long long free_blocks_for_user = stat.f_bavail; // Available to non-root
+    // unsigned long long free_blocks_total = stat.f_bfree; // Total free blocks
+
+    if (total_blocks == 0) {
+         fprintf(stderr, RED "Total blocks for path %s is zero.\n" RESET, path);
+        return -1.0f;
+    }
+    
+    unsigned long long used_blocks = total_blocks - free_blocks_for_user;
+    disk_percentage = (float)used_blocks * 100.0f / (float)total_blocks;
+
+    return disk_percentage;
+}
+
+// --- Print with Timestamp ---
+void print_with_timestamp(const char *message, const char *color) {
+    time_t now = time(NULL);
+    char time_str[20]; // "YYYY-MM-DD HH:MM:SS\0"
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&now));
+    if (color) {
+        printf("%s%s - %s%s\n", color, time_str, message, RESET);
+    } else {
+        printf("%s - %s\n", time_str, message);
+    }
+    fflush(stdout); // Ensure it's printed immediately
+}
+
+
+// --- Main Function ---
+int main() {
+    float cpu_threshold, ram_threshold, disk_threshold;
+    int interval_seconds;
+    const char *disk_path_to_monitor = "/"; // Monitor root filesystem
+
+    printf("--- System Monitor Configuration ---\n");
+
+    // Get CPU Threshold
+    do {
+        printf("Enter CPU threshold (0-100, e.g., 80.0 for 80%%): ");
+        if (scanf("%f", &cpu_threshold) != 1 || cpu_threshold < 0 || cpu_threshold > 100) {
+            printf(RED "Invalid input. Please enter a number between 0 and 100.\n" RESET);
+            while (getchar() != '\n'); // Clear invalid input
+            cpu_threshold = -1; // Force re-loop
+        }
+    } while (cpu_threshold < 0);
+    while (getchar() != '\n'); // Clear trailing newline
+
+    // Get RAM Threshold
+    do {
+        printf("Enter RAM threshold (0-100, e.g., 85.0 for 85%%): ");
+        if (scanf("%f", &ram_threshold) != 1 || ram_threshold < 0 || ram_threshold > 100) {
+            printf(RED "Invalid input. Please enter a number between 0 and 100.\n" RESET);
+            while (getchar() != '\n');
+            ram_threshold = -1;
+        }
+    } while (ram_threshold < 0);
+    while (getchar() != '\n');
+
+    // Get Disk Threshold
+    do {
+        printf("Enter Disk threshold for '%s' (0-100, e.g., 90.0 for 90%%): ", disk_path_to_monitor);
+        if (scanf("%f", &disk_threshold) != 1 || disk_threshold < 0 || disk_threshold > 100) {
+            printf(RED "Invalid input. Please enter a number between 0 and 100.\n" RESET);
+            while (getchar() != '\n');
+            disk_threshold = -1;
+        }
+    } while (disk_threshold < 0);
+    while (getchar() != '\n');
+
+    // Get Interval
+    do {
+        printf("Enter monitoring interval in seconds (e.g., 5): ");
+        if (scanf("%d", &interval_seconds) != 1 || interval_seconds <= 0) {
+            printf(RED "Invalid input. Please enter a positive integer.\n" RESET);
+            while (getchar() != '\n');
+            interval_seconds = 0;
+        }
+    } while (interval_seconds <= 0);
+    while (getchar() != '\n');
+
+
+    char info_msg[200];
+    sprintf(info_msg, "Monitoring started. CPU > %.1f%%, RAM > %.1f%%, Disk ('%s') > %.1f%%. Interval: %ds",
+            cpu_threshold, ram_threshold, disk_path_to_monitor, disk_threshold, interval_seconds);
+    print_with_timestamp(info_msg, GREEN);
+    
+    // Initial call to CPU usage to establish baseline (it returns 0.0f first time)
+    // We need a small delay before the first *real* CPU usage calculation
+    print_with_timestamp("Calibrating CPU usage (initial reading)...", YELLOW);
+    get_cpu_usage(); // First call to populate static vars
+    sleep(1);        // Wait 1 second for a delta to calculate CPU %
+
+    while (1) {
+        float current_cpu = get_cpu_usage();
+        float current_ram = get_ram_usage();
+        float current_disk = get_disk_usage(disk_path_to_monitor);
+
+        char status_msg[256];
+        sprintf(status_msg, "Current Stats: CPU: %.2f%%, RAM: %.2f%%, Disk ('%s'): %.2f%%",
+                current_cpu, current_ram, disk_path_to_monitor, current_disk);
+        print_with_timestamp(status_msg, NULL); // No specific color for normal status
+
+        // Check thresholds and alert
+        if (current_cpu >= 0 && current_cpu > cpu_threshold) {
+            char alert_msg[100];
+            sprintf(alert_msg, "ALERT: CPU usage (%.2f%%) exceeds threshold (%.1f%%)!", current_cpu, cpu_threshold);
+            print_with_timestamp(alert_msg, RED);
+        }
+        if (current_ram >= 0 && current_ram > ram_threshold) {
+            char alert_msg[100];
+            sprintf(alert_msg, "ALERT: RAM usage (%.2f%%) exceeds threshold (%.1f%%)!", current_ram, ram_threshold);
+            print_with_timestamp(alert_msg, RED);
+        }
+        if (current_disk >= 0 && current_disk > disk_threshold) {
+            char alert_msg[100];
+            sprintf(alert_msg, "ALERT: Disk usage for '%s' (%.2f%%) exceeds threshold (%.1f%%)!", disk_path_to_monitor, current_disk, disk_threshold);
+            print_with_timestamp(alert_msg, RED);
+        }
+
+        sleep(interval_seconds > 0 ? interval_seconds : 1); // Ensure sleep is at least 1 if user enters 0 interval for cpu
+    }
+
     return 0;
 }
-
-// --- /proc Open Function ---
-static int health_proc_open(struct inode *inode, struct file *file)
-{
-    return single_open(file, health_proc_show, NULL);
-}
-
-// --- Module Initialization Function ---
-static int __init sys_health_init(void)
-{
-    printk(KERN_INFO "[%s] Loading System Health Monitor Module v0.4 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
-
-    // Create /proc entry
-    proc_file_entry = proc_create(proc_filename, 0444, NULL, &health_proc_ops);
-    if (proc_file_entry == NULL) {
-        printk(KERN_ERR "[%s] Error creating /proc/%s entry!\n", GROUP_NAME, proc_filename);
-        return -ENOMEM;
-    }
-    printk(KERN_INFO "[%s] /proc/%s entry created.\n", GROUP_NAME, proc_filename);
-
-    // Setup the timer
-    timer_setup(&health_timer, collect_and_check_metrics, 0);
-
-    // Run collection once immediately to populate initial values
-    collect_and_check_metrics(NULL);
-    // Now arm the timer for the next regular interval
-    mod_timer(&health_timer, jiffies + msecs_to_jiffies(timer_interval_ms));
-
-    printk(KERN_INFO "[%s] Health check timer started (runs every %lu ms).\n", GROUP_NAME, timer_interval_ms);
-
-    return 0; // Success
-}
-
-// --- Module Cleanup Function ---
-static void __exit sys_health_exit(void)
-{
-    printk(KERN_INFO "[%s] Unloading System Health Monitor Module v0.4 (Members: %s).\n", GROUP_NAME, MEMBER_NAMES);
-
-    // Delete the timer
-    del_timer_sync(&health_timer); // Wait for timer callback to finish if running
-    printk(KERN_INFO "[%s] Health check timer stopped.\n", GROUP_NAME);
-
-    // Remove the /proc entry
-    if (proc_file_entry) {
-        proc_remove(proc_file_entry);
-        printk(KERN_INFO "[%s] /proc/%s entry removed.\n", GROUP_NAME, proc_filename);
-    }
-}
-
-// --- Register Init and Exit Functions ---
-module_init(sys_health_init);
-module_exit(sys_health_exit);

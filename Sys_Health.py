@@ -1,17 +1,15 @@
 import psutil
 import time
-import smtplib
-from email.mime.text import MIMEText
+import subprocess
 import os
-import getpass # For securely getting password
 
 # --- Configuration & User Input ---
 DEFAULT_FILESYSTEM_TO_MONITOR = '/'
-LOG_FILE_PATH = "/tmp/system_monitor.log" # Using /tmp for easier permissions
+LOG_FILE_PATH = "/tmp/system_monitor_popup.log" # Using /tmp for easier permissions
 
 def get_user_config():
     """Gets monitoring configuration from the user."""
-    print("--- System Monitor Configuration ---")
+    print("--- System Monitor Configuration (Pop-up Alerts) ---")
     
     while True:
         try:
@@ -42,12 +40,6 @@ def get_user_config():
                 print("Disk threshold must be between 0 and 100.")
         except ValueError:
             print("Invalid input. Please enter a number.")
-
-    alert_email_to = input("Enter email address for alerts: ")
-    
-    print("\n--- Gmail Configuration for Alerts ---")
-    smtp_user = input("Enter your Gmail address (e.g., your_email@gmail.com): ")
-    smtp_pass = getpass.getpass(prompt="Enter your Gmail App Password (or password if not using 2-Step Verification): ")
     
     while True:
         try:
@@ -59,26 +51,26 @@ def get_user_config():
         except ValueError:
             print("Invalid input. Please enter a number.")
             
-    return cpu_thresh, ram_thresh, disk_thresh, alert_email_to, smtp_user, smtp_pass, check_interval_sec
+    return cpu_thresh, ram_thresh, disk_thresh, check_interval_sec
 
-# --- Email Sending Function ---
-def send_alert_email(subject, body, to_email, from_email, smtp_server, smtp_port, smtp_username, smtp_password):
-    """Sends an email alert."""
+# --- Pop-up Alert Function ---
+def send_popup_alert(summary, body, urgency="critical"):
+    """Sends a desktop pop-up notification."""
     try:
-        msg = MIMEText(body)
-        msg['Subject'] = subject
-        msg['From'] = from_email
-        msg['To'] = to_email
-
-        print(f"Attempting to send email: To={to_email}, Subject={subject}")
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_username, smtp_password)
-            server.sendmail(from_email, to_email, msg.as_string())
-        print("Alert email sent successfully.")
-        log_event(f"Alert email sent: To={to_email}, Subject={subject}")
+        # Using subprocess.run for better control and error handling
+        command = ['notify-send', '-u', urgency, summary, body]
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        log_event(f"Pop-up alert sent: Summary='{summary}'")
+    except FileNotFoundError:
+        error_message = "Error: 'notify-send' command not found. Please install libnotify-bin or equivalent."
+        print(error_message)
+        log_event(error_message)
+    except subprocess.CalledProcessError as e:
+        error_message = f"Failed to send pop-up alert. Command '{e.cmd}' returned non-zero exit status {e.returncode}.\nStderr: {e.stderr}"
+        print(error_message)
+        log_event(error_message)
     except Exception as e:
-        error_message = f"Failed to send alert email: {e}"
+        error_message = f"An unexpected error occurred while sending pop-up alert: {e}"
         print(error_message)
         log_event(error_message)
 
@@ -86,72 +78,70 @@ def send_alert_email(subject, body, to_email, from_email, smtp_server, smtp_port
 def log_event(message):
     """Logs an event to the console and a log file."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    # Get current date for log file name
+    current_date_str = time.strftime("%Y-%m-%d", time.localtime())
+    dated_log_file_path = f"/tmp/system_monitor_popup_{current_date_str}.log"
+
     log_message = f"{timestamp} - {message}"
-    print(log_message)
+    print(log_message) # Also print to console for real-time feedback
     try:
-        with open(LOG_FILE_PATH, "a") as f:
+        with open(dated_log_file_path, "a") as f:
             f.write(log_message + "\n")
     except Exception as e:
-        print(f"Could not write to log file {LOG_FILE_PATH}: {e}")
+        print(f"Could not write to log file {dated_log_file_path}: {e}")
 
 # --- Main Monitoring Logic ---
-def monitor_system(cpu_thresh, ram_thresh, disk_thresh, alert_email_to, smtp_user, smtp_pass):
-    """Monitors system resources and sends alerts if thresholds are exceeded."""
+def monitor_system(cpu_thresh, ram_thresh, disk_thresh):
+    """Monitors system resources and sends pop-up alerts if thresholds are exceeded."""
     hostname = os.uname()[1]
-    smtp_server_config = 'smtp.gmail.com'
-    smtp_port_config = 587
 
     # CPU Usage
     current_cpu_usage = psutil.cpu_percent(interval=1)
     log_event(f"Current CPU Usage: {current_cpu_usage:.2f}%")
     if current_cpu_usage >= cpu_thresh:
-        subject = f"ALERT: High CPU Usage on {hostname}"
-        body = (f"CPU usage on server '{hostname}' is at {current_cpu_usage:.2f}%, "
-                f"which exceeds the threshold of {cpu_thresh:.2f}%.")
-        send_alert_email(subject, body, alert_email_to, smtp_user, smtp_server_config, smtp_port_config, smtp_user, smtp_pass)
+        summary = f"ALERT: High CPU Usage on {hostname}"
+        body = (f"CPU usage is at {current_cpu_usage:.2f}%, "
+                f"exceeding threshold of {cpu_thresh:.2f}%.")
+        send_popup_alert(summary, body)
 
     # RAM Usage
     memory_info = psutil.virtual_memory()
     current_ram_usage = memory_info.percent
     log_event(f"Current RAM Usage: {current_ram_usage:.2f}%")
     if current_ram_usage >= ram_thresh:
-        subject = f"ALERT: High RAM Usage on {hostname}"
-        body = (f"RAM usage on server '{hostname}' is at {current_ram_usage:.2f}%, "
-                f"which exceeds the threshold of {ram_thresh:.2f}%.")
-        send_alert_email(subject, body, alert_email_to, smtp_user, smtp_server_config, smtp_port_config, smtp_user, smtp_pass)
+        summary = f"ALERT: High RAM Usage on {hostname}"
+        body = (f"RAM usage is at {current_ram_usage:.2f}%, "
+                f"exceeding threshold of {ram_thresh:.2f}%.")
+        send_popup_alert(summary, body)
 
     # Disk Usage
     disk_info = psutil.disk_usage(DEFAULT_FILESYSTEM_TO_MONITOR)
     current_disk_usage = disk_info.percent
     log_event(f"Current Disk Usage for '{DEFAULT_FILESYSTEM_TO_MONITOR}': {current_disk_usage:.2f}%")
     if current_disk_usage >= disk_thresh:
-        subject = f"ALERT: High Disk Usage on {hostname} ({DEFAULT_FILESYSTEM_TO_MONITOR})"
-        body = (f"Disk usage for '{DEFAULT_FILESYSTEM_TO_MONITOR}' on server '{hostname}' is at {current_disk_usage:.2f}%, "
-                f"which exceeds the threshold of {disk_thresh:.2f}%.")
-        send_alert_email(subject, body, alert_email_to, smtp_user, smtp_server_config, smtp_port_config, smtp_user, smtp_pass)
+        summary = f"ALERT: High Disk Usage on {hostname} ({DEFAULT_FILESYSTEM_TO_MONITOR})"
+        body = (f"Disk usage for '{DEFAULT_FILESYSTEM_TO_MONITOR}' is at {current_disk_usage:.2f}%, "
+                f"exceeding threshold of {disk_thresh:.2f}%.")
+        send_popup_alert(summary, body)
 
 # --- Main Execution ---
 if __name__ == "__main__":
     try:
-        (CPU_THRESHOLD, RAM_THRESHOLD, DISK_THRESHOLD,
-         ALERT_EMAIL_TO, SMTP_USERNAME, SMTP_PASSWORD, CHECK_INTERVAL) = get_user_config()
+        (CPU_THRESHOLD, RAM_THRESHOLD, DISK_THRESHOLD, CHECK_INTERVAL) = get_user_config()
 
-        log_event("System Monitor Started.")
+        log_event("System Monitor Started (Pop-up Alerts).")
         log_event(f"Monitoring: CPU > {CPU_THRESHOLD}%, RAM > {RAM_THRESHOLD}%, Disk ('{DEFAULT_FILESYSTEM_TO_MONITOR}') > {DISK_THRESHOLD}%")
-        log_event(f"Alerts will be sent to: {ALERT_EMAIL_TO} via {SMTP_USERNAME}")
         log_event(f"Check interval: {CHECK_INTERVAL} seconds.")
-        log_event(f"Log file: {LOG_FILE_PATH}")
-
+        log_event(f"Log files will be in /tmp/system_monitor_popup_YYYY-MM-DD.log")
 
         while True:
-            monitor_system(CPU_THRESHOLD, RAM_THRESHOLD, DISK_THRESHOLD,
-                           ALERT_EMAIL_TO, SMTP_USERNAME, SMTP_PASSWORD)
+            monitor_system(CPU_THRESHOLD, RAM_THRESHOLD, DISK_THRESHOLD)
             log_event(f"Waiting for {CHECK_INTERVAL} seconds before next check...")
             time.sleep(CHECK_INTERVAL)
 
     except KeyboardInterrupt:
         log_event("System Monitor stopped by user.")
     except Exception as e:
-        log_event(f"An unexpected error occurred: {e}")
+        log_event(f"An unexpected error occurred in the main loop: {e}")
     finally:
         log_event("System Monitor shutting down.")
